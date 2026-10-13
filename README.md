@@ -1,5 +1,5 @@
 # ULL-Rocket-Telemetry
-Firmware developed for the University of Louisiana at Lafayette (ULL) ULift Rocketry Team’s 2025 IREC sounding rocket. The system used an MPU6050 IMU and quaternion-based Madgwick sensor fusion to estimate rocket attitude, then transmitted pitch, roll, yaw, and barometric altitude over an SX1278 LoRa link to a ground station built by ULL’s CAPE team. It also logged attitude, altitude, temperature, pressure, and elapsed time to an SD card.
+Firmware developed for the University of Louisiana at Lafayette (ULL) ULift Rocketry Team’s 2025 IREC sounding rocket. The system used an MPU6050 IMU and quaternion-based Madgwick sensor fusion to estimate rocket attitude, then transmitted pitch, roll, yaw, and barometric altitude over an SX1278 LoRa link to a ground station built by ULL’s CAPE team. 
 
 ## Hardware
 
