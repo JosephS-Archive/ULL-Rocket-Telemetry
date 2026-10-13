@@ -1,0 +1,166 @@
+#include <RadioLib.h>
+
+/*****************************************************
+**************** Physical Connections ****************
+*****************************************************/
+// SX1278 LoRa UHF RFM (Module 1) - Yellow Dot
+#define VSPI_MISO 19
+#define VSPI_MOSI 23
+#define VSPI_SCLK 18
+#define UHF_RFM_CS 5      // GPIO Pin 15  - RFM 1 Chip Select
+#define UHF_RFM_DIO0 32   // GPIO Pin 25 - RFM 1 Interrupt Pin
+#define UHF_RFM_Reset 33  // GPIO Pin 26 - RFM 1 Reset Pin
+// Common LoRa RFM Pins
+#define DIO1 RADIOLIB_NC  // Shared Inactive RFM Interupt 1 Pin
+
+/*****************************************************
+**************** Software Parameters *****************
+*****************************************************/
+// SX1278 LoRa UHF RFM (Module 1) - Yellow Dot
+#define UHF_RFM_Frequency 434.0                     // 434 MHz - RFM 1 Frequency
+#define UHF_RFM_BandWidth 125.0                     // 125 bits / sec - RFM 1 Band Width
+#define UHF_RFM_SpreadFactor 9                      // RFM 1 Spread Factor
+#define UHF_RFM_CodingRate 7                        // RFM 1 Coding Rate
+#define UHF_RFM_SyncWord RADIOLIB_SX127X_SYNC_WORD  // RFM 1 SyncWord
+#define UHF_RFM_PreambleLength 8                    // RFM 1 Preamble Length
+#define UHF_RFM_OutputPower 10                      // RFM 1 Power 10 dBm
+#define UHF_RFM_Gain 0                              // RFM 1 Gain
+// Ground-Station specifics
+#define CallSign "K15EEG"  // Default FCC Call Sign
+
+/*****************************************************
+***************** Radio Declarations *****************
+*****************************************************/
+// Flag for UHF Tx
+volatile bool UHF_RFM_Tx_Flag = false;
+void IRAM_ATTR UHF_RFM_Tx_SetFlag(void) {
+  UHF_RFM_Tx_Flag = true;
+}
+
+// Transmission state tracking
+int transmissionState = RADIOLIB_ERR_NONE;
+
+// counter to keep track of transmitted packets
+String UHF_RFM_Tx_Payload = "UHF Radio Testing from ULift";  // Initial Transmitting Payload
+
+/*****************************************************
+**************** Obj/Class Declaration ***************
+*****************************************************/
+// Initialize SPI busses
+SPIClass VSPI_Radio1(VSPI);  // Using the proper identifier for VSPI
+// Initialize LoRa RFM Objects
+SX1278 UHF_RFM = new Module(UHF_RFM_CS, UHF_RFM_DIO0, UHF_RFM_Reset, DIO1, VSPI_Radio1);  // UHF RFM Object
+
+
+int count = 0;  // ***********************************************
+
+
+
+/*************************
+********* LoRa RFM *******
+*************************/
+/*
+  Author: Darshan Kumar
+  Use: RFM Initialization
+  Description: Talks to the RFM via SPI and
+  determines if the RFM is useable then sets
+  the default flag to transmit mode. Checks
+  the device and turns on the radio.
+*/
+/*****************************************************
+**************** LORA Initialization *****************
+*****************************************************/
+void RFMInit() {
+  VSPI_Radio1.begin(VSPI_SCLK, VSPI_MISO, VSPI_MOSI, UHF_RFM_CS);  // SCLK, MISO, MOSI, and an arbitrary CS pin (not used if overridden by RadioLib)
+
+  //********************//
+  // UHF RFM Init Below //
+  //********************//
+  // initialize SX1278 with default settings
+  Serial.print(F("[SX1278] Initializing ... "));
+  int state = UHF_RFM.begin();
+  if (state == RADIOLIB_ERR_NONE) {
+    Serial.println(F("success!"));
+  } else {
+    Serial.print(F("failed, code "));
+    Serial.println(state);
+    while (true) { delay(10); }
+  }
+
+  // set the function that will be called
+  // when packet transmission is finished
+  UHF_RFM.setPacketSentAction(UHF_RFM_Tx_SetFlag);
+
+  // start transmitting the first packet
+  Serial.print(F("[SX1278] Sending first packet ... "));
+
+  // you can transmit C-string or Arduino string up to
+  // 255 characters long
+  transmissionState = UHF_RFM.startTransmit("Hello World!");
+
+  // you can also transmit byte array up to 255 bytes long
+  /*
+    byte byteArr[] = {0x01, 0x23, 0x45, 0x67,
+                      0x89, 0xAB, 0xCD, 0xEF};
+    transmissionState = radio.startTransmit(byteArr, 8);
+  */
+}
+
+
+ 
+/*****************************************************
+******************** RFM Transmitt *******************
+*****************************************************/
+
+
+// ************************ //
+// ***** UHF Radio Tx ***** //
+// ************************ //
+void set_UHF_RFM_Tx_Payload(String TxPayload) {
+  UHF_RFM_Tx_Payload = TxPayload;
+}
+
+void UHF_RFM_Transmit() {
+  // check if the previous transmission finished
+  if(UHF_RFM_Tx_Flag) {
+    // reset flag
+    UHF_RFM_Tx_Flag = false;
+
+    if (transmissionState == RADIOLIB_ERR_NONE) {
+      // packet was successfully sent
+      Serial.println(F("transmission finished!"));
+
+      // NOTE: when using interrupt-driven transmit method,
+      //       it is not possible to automatically measure
+      //       transmission data rate using getDataRate()
+
+    } else {
+      Serial.print(F("failed, code "));
+      Serial.println(transmissionState);
+
+    }
+
+    // clean up after transmission is finished
+    // this will ensure transmitter is disabled,
+    // RF switch is powered down etc.
+    UHF_RFM.finishTransmit();
+
+
+    // send another one
+    Serial.print(F("[SX1278] Sending another packet ... "));
+
+    // you can transmit C-string or Arduino string up to
+    // 255 characters long
+    String str = UHF_RFM_Tx_Payload+ "#" + String(count++);
+    transmissionState = UHF_RFM.startTransmit(str);
+
+    // you can also transmit byte array up to 255 bytes long
+    /*
+      byte byteArr[] = {0x01, 0x23, 0x45, 0x67,
+                        0x89, 0xAB, 0xCD, 0xEF};
+      transmissionState = radio.startTransmit(byteArr, 8);
+    */
+  } else {
+    Serial.println("UHF Radio Still Transmitting. Please Wait.");
+  }
+}
