@@ -1,0 +1,240 @@
+// Libraries Included
+#include <MPU6050_WE.h>
+#include <Wire.h>
+#include <Adafruit_BMP3XX.h>
+#include <SPI.h>
+#include <SD.h>
+#include <TimeLib.h> 
+
+File dataFile;
+
+// SD Card SPI pins
+#define SD_CS 13
+#define SD_SCK 14
+#define SD_MOSI 15
+#define SD_MISO 2
+#define MPU6050_ADDR 0x68
+
+MPU6050_WE myMPU6050 = MPU6050_WE(MPU6050_ADDR);
+Adafruit_BMP3XX bmp;
+
+//FPGAS
+
+//Barometer Variables
+bool isCalibrated = false;
+float initialAltitudeMeters;
+unsigned long previousTime = 0;
+float refPressure;
+
+// Madgwick filter variables
+float beta = 0.05;
+float q0 = 1.0, q1 = 0.0, q2 = 0.0, q3 = 0.0;
+
+// High-pass filter parameters
+const float pitchHPAlpha = 0.99;
+const float rollHPAlpha  = 0.99;
+const float yawHPAlpha   = 0.98;
+
+// Filtered angle states
+float filteredPitch = 0.0, filteredRoll = 0.0, filteredYaw = 0.0;
+float continuousPitch = 0.0, continuousRoll = 0.0, continuousYaw = 0.0;
+float prevPitch = 0.0, prevRoll = 0.0, prevYaw = 0.0;
+
+void averageRefPressure(int samples = 20, int delayBetween = 50) {
+  float total = 0;
+  int validReadings = 0;
+
+  for (int i = 0; i < samples; i++) {
+    if (bmp.performReading()) {
+      total += bmp.pressure;
+      validReadings++;
+    } else {
+      Serial.println("BMP388 read failed during averaging.");
+    }
+    delay(delayBetween);
+  }
+
+  if (validReadings == 0) {
+    Serial.println("No valid readings collected! Using fallback value 101325 Pa.");
+    refPressure = 101325.0;  // standard sea-level pressure
+  } else {
+    refPressure = total / validReadings;
+  }
+
+  // Optionally update altitude baseline too
+  initialAltitudeMeters = bmp.readAltitude(refPressure);
+
+  Serial.print("Averaged Ref Pressure (Pa): ");
+  Serial.println(refPressure);
+  Serial.print("Initial Altitude (m): ");
+  Serial.println(initialAltitudeMeters);
+}
+
+
+void setup() {
+  Serial.begin(115200);
+  Wire.begin();
+  RFMInit();
+  SPI.begin(SD_SCK, SD_MISO, SD_MOSI, SD_CS); //SD Card Initialization
+  if (!SD.begin(SD_CS)) {
+    Serial.println("SD card initialization failed!");
+  }
+  else{
+    Serial.println("SD card intialized successfully.");
+    setTime(0, 0, 0, 1, 1, 1970); //Starts clock at time 00:00:00
+    dataFile = SD.open("/Data.txt", FILE_APPEND);
+    if (dataFile) { //Formatting for SD Card Writing
+      dataFile.println("Pitch,Roll,Yaw,Altitude,Temp,Pressure,Time");
+      Serial.println("Formatted data successfully");
+      dataFile.close();
+  }
+  } //MPU6050 Initialization
+  if (!myMPU6050.init()) {
+    Serial.println("MPU6050 does not respond");
+    while (1);
+  }
+
+  Serial.println("MPU6050 connected.");
+
+  Serial.println("Calibrating... don't move the sensor");
+  delay(1000);
+  myMPU6050.autoOffsets();
+  Serial.println("Calibration complete.");
+
+  myMPU6050.setGyrRange(MPU6050_GYRO_RANGE_250);
+  myMPU6050.setAccRange(MPU6050_ACC_RANGE_2G);
+//Initializing BMP388
+  if (!bmp.begin_I2C()) {
+    Serial.println("BMP388 not detected!");
+    while (1);
+  }
+
+  bmp.setTemperatureOversampling(BMP3_OVERSAMPLING_8X);
+  bmp.setPressureOversampling(BMP3_OVERSAMPLING_4X);
+  bmp.setIIRFilterCoeff(BMP3_IIR_FILTER_COEFF_3);
+  bmp.setOutputDataRate(BMP3_ODR_50_HZ);
+  delay(1000);
+
+  // Perform a reading before using bmp.pressure
+  if (!bmp.performReading()) {
+    Serial.println("BMP388 reading failed!");
+    while (1);
+  }
+
+  averageRefPressure(30, 100);  // set correct reference pressure
+  initialAltitudeMeters = bmp.readAltitude(refPressure);
+
+  isCalibrated = true;
+
+  Serial.println("Setup complete. Ready to collect and transmit data!");
+  
+  previousTime = millis();
+}
+
+void loop() {
+
+  //Gives us a 9 character string like "00:00:05" — the time since loop started.
+char timeStr[9];
+sprintf(timeStr, "%02d:%02d:%02d", hour(), minute(), second());
+
+if (!isCalibrated) return; //Filtering fucntion
+  unsigned long currentTime = millis();
+  float deltaTime = (currentTime - previousTime) / 1000.0;
+  previousTime = currentTime;
+
+  xyzFloat acc = myMPU6050.getGValues();
+  xyzFloat gyr = myMPU6050.getGyrValues();
+
+  madgwickUpdate(acc.x, acc.y, acc.z, gyr.x, gyr.y, gyr.z, deltaTime);
+
+  float rawPitch = atan2(2*(q0*q1 + q2*q3), 1-2*(q1*q1 + q2*q2)) * 180/PI;
+  float rawRoll  = asin(2*(q0*q2 - q3*q1)) * 180/PI;
+  float rawYaw   = atan2(2*(q0*q3 + q1*q2), 1-2*(q2*q2 + q3*q3)) * 180/PI;
+
+  continuousPitch = unwrapAngle(rawPitch, prevPitch);
+  continuousRoll  = unwrapAngle(rawRoll, prevRoll);
+  continuousYaw   = unwrapAngle(rawYaw, prevYaw);
+
+  filteredPitch = pitchHPAlpha * (filteredPitch + continuousPitch - prevPitch);
+  filteredRoll  = rollHPAlpha  * (filteredRoll  + continuousRoll  - prevRoll);
+  filteredYaw   = yawHPAlpha   * (filteredYaw   + continuousYaw   - prevYaw);
+
+  prevPitch = continuousPitch;
+  prevRoll  = continuousRoll;
+  prevYaw   = continuousYaw;  
+  
+  //Read Altimeter Data
+float temperature = bmp.temperature;
+float pressure = bmp.pressure;  // pa
+float altitude = bmp.readAltitude(refPressure) - initialAltitudeMeters;
+
+  // Correct serial output for Processing:
+  Serial.print(filteredPitch); Serial.print(",");
+  Serial.print(filteredRoll); Serial.print(",");
+  Serial.print(filteredYaw);Serial.print(",");
+  Serial.println(altitude);
+
+  String tempVar = String(filteredPitch) + "," + String(filteredRoll) + "," + String(filteredYaw) + "," + String(altitude, 1);
+
+  SDwrite(tempVar + "," + String(temperature) + "," + String(pressure) + "," + String(timeStr));
+  set_UHF_RFM_Tx_Payload(tempVar);
+  
+  UHF_RFM_Transmit();
+}
+
+
+// Madgwick filter
+void madgwickUpdate(float ax, float ay, float az, float gx, float gy, float gz, float dt) {
+  gx *= PI / 180.0; gy *= PI / 180.0; gz *= PI / 180.0;
+  float norm = sqrt(ax*ax + ay*ay + az*az);
+  if(norm == 0) return;
+  ax /= norm; ay /= norm; az /= norm;
+
+  float qDot1 = 0.5f*(-q1*gx - q2*gy - q3*gz);
+  float qDot2 = 0.5f*(q0*gx + q2*gz - q3*gy);
+  float qDot3 = 0.5f*(q0*gy - q1*gz + q3*gx);
+  float qDot4 = 0.5f*(q0*gz + q1*gy - q2*gx);
+
+  float s0 = 2*(q1*q3 - q0*q2) - ax;
+  float s1 = 2*(q0*q1 + q2*q3) - ay;
+  float s2 = 2*(0.5f - q1*q1 - q2*q2) - az;
+
+  norm = sqrt(s0*s0 + s1*s1 + s2*s2);
+  if(norm == 0) return;
+  s0 /= norm; s1 /= norm; s2 /= norm;
+
+  qDot1 -= beta * s0;
+  qDot2 -= beta * s1;
+  qDot3 -= beta * s2;
+  qDot4 -= beta * (2*(q1*q2 + q0*q3) - az);
+
+  q0 += qDot1 * dt;
+  q1 += qDot2 * dt;
+  q2 += qDot3 * dt;
+  q3 += qDot4 * dt;
+
+  norm = sqrt(q0*q0 + q1*q1 + q2*q2 + q3*q3);
+  q0 /= norm; q1 /= norm; q2 /= norm; q3 /= norm;
+}
+
+// Angle unwrap
+float unwrapAngle(float currentAngle, float previousAngle) {
+  float delta = currentAngle - previousAngle;
+  if(delta > 180.0) delta -= 360.0;
+  else if(delta < -180.0) delta += 360.0;
+  return previousAngle + delta;
+}
+
+void SDwrite(String dataValue){ //SD Card datalogging 
+  dataFile = SD.open("/Data.txt", FILE_APPEND);
+  if (dataFile) {
+    dataFile.println(dataValue);
+    Serial.println("Wrote data successfully");
+    dataFile.close();
+  }
+  else{
+    Serial.println("Error writing.");
+    dataFile.close();
+  }
+
+}
